@@ -1,0 +1,95 @@
+# Comuni Extractor Configuration
+
+# Crawling Configuration
+crawling:
+  max_pages: 200
+  max_depth: 3
+  concurrency: 5
+  rate_limit: 1.0  # seconds between requests per domain
+  keywords:
+    - bilancio
+    - trasparenza
+    - rendiconto
+    - preventivo
+    - consuntivo
+    - bilancio preventivo
+    - bilancio consuntivo
+    - amministrazione trasparente
+  respect_robots_txt: true
+  timeout: 10  # seconds
+  # New options for PDF discovery robustness
+  allow_www_equivalence: true  # Treat www/non-www as same site
+  allow_subdomains: false  # Allow crawling of site subdomains
+  extract_pdf_from_raw_html: true  # Extract PDFs via regex pattern matching
+
+# PDF Configuration
+pdf:
+  max_size_mb: 50
+  readability_threshold: 0.7  # minimum alpha characters ratio
+  ocr_enabled: false
+  chunk_size: 1000  # characters
+  chunk_overlap: 200  # characters
+
+# ChatGPT Configuration
+chatgpt:
+  model: "gpt-3.5-turbo"  # or "gpt-4"
+  temperature: 0.3
+  max_tokens: 2000
+  retry_attempts: 3
+  rate_limit_delay: 1.0  # seconds between API calls
+  timeout: 60  # seconds
+
+# Retrieval Configuration
+retrieval:
+  algorithm: "tfidf"
+  top_k: 5
+  tfidf:
+    ngram_range: [1, 2]
+    max_features: 1000
+
+# Caching Configuration
+caching:
+  enabled: true
+  ttl_http: 86400  # 24 hours
+  ttl_pdf_text: 604800  # 7 days
+  ttl_llm_responses: 604800  # 7 days
+  cache_types:
+    http: true
+    pdf: true
+    text: true
+    llm: true
+
+# Path Configuration
+paths:
+  output_root: "./Comuni"
+  drive_dataset_path: "./dataset_dati_comuni"
+  guide_path: null  # will be auto-discovered in drive_dataset_path
+
+# Normalization and Field Mapping
+field_mapping:
+  override_guide: false
+  # Custom field specifications can be added here
+  # Example:
+  # custom_fields:
+  #   - name: entrate_totali
+  #     csv_id: 1
+  #     column: entrate_anno
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "json"  # json or text
+
+# Rate Limiting & Resilience
+resilience:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    recovery_timeout: 60  # seconds
+    half_open_max_calls: 1
+
+  backoff:
+    strategy: "exponential"  # exponential, linear
+    base: 2
+    max_delay: 300  # seconds
+    jitter: true
