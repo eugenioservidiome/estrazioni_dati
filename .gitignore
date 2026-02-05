@@ -1,0 +1,52 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Locals
+Comuni/
+dataset_dati_comuni/
+*.log
+config.yaml
+.secrets/
+
+# Build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Project-specific
+.ruff_cache/
+*.db
+cache/
+*.jsonl
+*.parquet
