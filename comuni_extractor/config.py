@@ -70,11 +70,8 @@ class ChatGPTConfig(BaseSettings):
     @classmethod
     def validate_model(cls, v: str) -> str:
         """Validate model name."""
-        valid_models = ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"]
-        if v not in valid_models:
-            raise ValueError(
-                f"model must be one of {valid_models}, got {v}"
-            )
+        if not v or not v.strip():
+            raise ValueError("model must be a non-empty string")
         return v
 
 

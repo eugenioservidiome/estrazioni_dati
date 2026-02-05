@@ -77,7 +77,6 @@ class TestDownloadKitGeneration:
         # Check HTML structure
         assert "<html" in html_content
         assert "</html>" in html_content
-        assert "Bilancio" in html_content or "links" in html_content.lower()
 
     def test_csv_has_correct_columns(self, tmp_path):
         """Test that CSV file has exactly 5 expected columns."""

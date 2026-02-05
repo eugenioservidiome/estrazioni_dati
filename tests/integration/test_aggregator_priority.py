@@ -2,232 +2,185 @@
 
 import pytest
 from comuni_extractor.extraction.aggregator import ResultAggregator
-from comuni_extractor.models import ExtractionResult
+from comuni_extractor.models import (
+    ExtractionCandidate,
+    ExtractionResult,
+    FieldDataType,
+    ValueType,
+)
 
 
 class TestAggregatorPriority:
-    """Test that aggregator prioritizes definitivo over previsione."""
+    """Test that aggregator prioritizes definitivo > consuntivo > previsione > preventivo."""
 
     def test_definitivo_wins_over_previsione_high_confidence(self):
         """Test definitivo is chosen even when previsione has higher confidence."""
-        # Create results for same field
-        results = [
-            ExtractionResult(
-                tipo_bilancio="previsione",
-                extracted_fields={"entrate_totali": "1500000"},
-                confidence_score=0.95,  # Higher confidence
-                pdf_source="bilancio_previsione.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={"entrate_totali": "1450000"},
-                confidence_score=0.75,  # Lower confidence
-                pdf_source="bilancio_definitivo.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
+        # Create result with multiple candidates
+        result = ExtractionResult(
+            field_name="entrate_totali",
+            csv_id=1,
+            column="entrate_totali",
+            data_type=FieldDataType.CURRENCY,
+            candidates=[
+                ExtractionCandidate(
+                    value="1500000",
+                    value_type=ValueType.PREVISIONE,
+                    confidence=0.95,  # Higher confidence
+                    source_pdf="bilancio_previsione.pdf",
+                    evidence="Le entrate previste sono 1.500.000 euro",
+                ),
+                ExtractionCandidate(
+                    value="1450000",
+                    value_type=ValueType.DEFINITIVO,
+                    confidence=0.75,  # Lower confidence
+                    source_pdf="bilancio_definitivo.pdf",
+                    evidence="Le entrate definitive ammontano a 1.450.000 euro",
+                ),
+            ],
+        )
 
         aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate(results)
+        aggregated = aggregator.aggregate_result(result)
 
         # Definitivo should win despite lower confidence
-        assert aggregated["entrate_totali"]["value"] == "1450000"
-        assert aggregated["entrate_totali"]["tipo_bilancio"] == "definitivo"
-        assert aggregated["entrate_totali"]["pdf_source"] == "bilancio_definitivo.pdf"
+        assert aggregated.value == "1450000"
+        assert aggregated.value_type == ValueType.DEFINITIVO
+        assert aggregated.source_pdf == "bilancio_definitivo.pdf"
+        assert aggregated.confidence == 0.75
 
-    def test_previsione_used_when_no_definitivo(self):
-        """Test previsione is used when definitivo is not available."""
-        results = [
-            ExtractionResult(
-                tipo_bilancio="previsione",
-                extracted_fields={"entrate_totali": "1500000", "spese_correnti": "1200000"},
-                confidence_score=0.85,
-                pdf_source="bilancio_previsione.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
-
-        aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate(results)
-
-        # Should use previsione when no definitivo exists
-        assert aggregated["entrate_totali"]["value"] == "1500000"
-        assert aggregated["entrate_totali"]["tipo_bilancio"] == "previsione"
-
-    def test_candidates_list_preserved(self):
-        """Test that all candidates are preserved in metadata."""
-        results = [
-            ExtractionResult(
-                tipo_bilancio="previsione",
-                extracted_fields={"entrate_totali": "1500000"},
-                confidence_score=0.90,
-                pdf_source="previsione.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={"entrate_totali": "1450000"},
-                confidence_score=0.80,
-                pdf_source="definitivo.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={"entrate_totali": "1455000"},
-                confidence_score=0.70,
-                pdf_source="definitivo_v2.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
+    def test_consuntivo_wins_over_previsione(self):
+        """Test consuntivo beats previsione."""
+        result = ExtractionResult(
+            field_name="spese_totali",
+            csv_id=1,
+            column="spese_totali",
+            data_type=FieldDataType.CURRENCY,
+            candidates=[
+                ExtractionCandidate(
+                    value="1200000",
+                    value_type=ValueType.PREVISIONE,
+                    confidence=0.90,
+                    source_pdf="previsione.pdf",
+                    evidence="Spese previste",
+                ),
+                ExtractionCandidate(
+                    value="1180000",
+                    value_type=ValueType.CONSUNTIVO,
+                    confidence=0.80,
+                    source_pdf="consuntivo.pdf",
+                    evidence="Spese a consuntivo",
+                ),
+            ],
+        )
 
         aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate(results)
+        aggregated = aggregator.aggregate_result(result)
 
-        # Check candidates list
-        candidates = aggregated["entrate_totali"]["candidates"]
-        assert len(candidates) == 3
-        
-        # All candidates should be present
-        values = [c["value"] for c in candidates]
-        assert "1500000" in values
-        assert "1450000" in values
-        assert "1455000" in values
+        assert aggregated.value == "1180000"
+        assert aggregated.value_type == ValueType.CONSUNTIVO
 
-    def test_multiple_fields_independent_aggregation(self):
-        """Test that different fields are aggregated independently."""
-        results = [
-            ExtractionResult(
-                tipo_bilancio="previsione",
-                extracted_fields={
-                    "entrate_totali": "1500000",
-                    "spese_correnti": "1200000",
-                },
-                confidence_score=0.90,
-                pdf_source="previsione.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={
-                    "entrate_totali": "1450000",
-                    # spese_correnti not found in definitivo
-                },
-                confidence_score=0.85,
-                pdf_source="definitivo.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
+    def test_previsione_used_when_no_higher_priority(self):
+        """Test previsione is used when definitivo/consuntivo not available."""
+        result = ExtractionResult(
+            field_name="entrate_totali",
+            csv_id=1,
+            column="entrate_totali",
+            data_type=FieldDataType.CURRENCY,
+            candidates=[
+                ExtractionCandidate(
+                    value="1500000",
+                    value_type=ValueType.PREVISIONE,
+                    confidence=0.85,
+                    source_pdf="bilancio_previsione.pdf",
+                    evidence="Entrate previste",
+                ),
+            ],
+        )
 
         aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate(results)
+        aggregated = aggregator.aggregate_result(result)
 
-        # entrate_totali should come from definitivo
-        assert aggregated["entrate_totali"]["value"] == "1450000"
-        assert aggregated["entrate_totali"]["tipo_bilancio"] == "definitivo"
-
-        # spese_correnti should come from previsione (only available there)
-        assert aggregated["spese_correnti"]["value"] == "1200000"
-        assert aggregated["spese_correnti"]["tipo_bilancio"] == "previsione"
+        assert aggregated.value == "1500000"
+        assert aggregated.value_type == ValueType.PREVISIONE
 
     def test_highest_confidence_within_same_tipo(self):
-        """Test that highest confidence wins among same tipo_bilancio."""
-        results = [
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={"entrate_totali": "1450000"},
-                confidence_score=0.70,
-                pdf_source="definitivo_v1.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={"entrate_totali": "1455000"},
-                confidence_score=0.90,  # Higher confidence
-                pdf_source="definitivo_v2.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
+        """Test that highest confidence wins among same value_type."""
+        result = ExtractionResult(
+            field_name="entrate_totali",
+            csv_id=1,
+            column="entrate_totali",
+            data_type=FieldDataType.CURRENCY,
+            candidates=[
+                ExtractionCandidate(
+                    value="1450000",
+                    value_type=ValueType.DEFINITIVO,
+                    confidence=0.70,
+                    source_pdf="definitivo_v1.pdf",
+                    evidence="Entrate definitive v1",
+                ),
+                ExtractionCandidate(
+                    value="1455000",
+                    value_type=ValueType.DEFINITIVO,
+                    confidence=0.90,  # Higher confidence
+                    source_pdf="definitivo_v2.pdf",
+                    evidence="Entrate definitive v2",
+                ),
+            ],
+        )
 
         aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate(results)
+        aggregated = aggregator.aggregate_result(result)
 
         # Should pick higher confidence among definitivos
-        assert aggregated["entrate_totali"]["value"] == "1455000"
-        assert aggregated["entrate_totali"]["confidence_score"] == 0.90
+        assert aggregated.value == "1455000"
+        assert aggregated.confidence == 0.90
+        assert aggregated.source_pdf == "definitivo_v2.pdf"
 
-    def test_empty_results_list(self):
-        """Test that empty results list returns empty aggregation."""
-        aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate([])
-
-        assert aggregated == {}
-
-    def test_result_with_no_extracted_fields(self):
-        """Test handling of result with empty extracted_fields."""
-        results = [
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={},  # No fields extracted
-                confidence_score=0.50,
-                pdf_source="empty.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="previsione",
-                extracted_fields={"entrate_totali": "1500000"},
-                confidence_score=0.85,
-                pdf_source="previsione.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
+    def test_empty_candidates_list(self):
+        """Test that empty candidates list leaves value as None."""
+        result = ExtractionResult(
+            field_name="test_field",
+            csv_id=1,
+            column="test_col",
+            data_type=FieldDataType.TEXT,
+            candidates=[],
+        )
 
         aggregator = ResultAggregator()
-        aggregated = aggregator.aggregate(results)
+        aggregated = aggregator.aggregate_result(result)
 
-        # Should still get previsione value
-        assert "entrate_totali" in aggregated
-        assert aggregated["entrate_totali"]["value"] == "1500000"
+        assert aggregated.value is None
+        assert aggregated.value_type is None
+        assert aggregated.confidence is None
 
-    def test_deterministic_aggregation(self):
-        """Test that aggregation is deterministic for same input."""
-        results = [
-            ExtractionResult(
-                tipo_bilancio="previsione",
-                extracted_fields={"entrate_totali": "1500000"},
-                confidence_score=0.85,
-                pdf_source="a.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-            ExtractionResult(
-                tipo_bilancio="definitivo",
-                extracted_fields={"entrate_totali": "1450000"},
-                confidence_score=0.80,
-                pdf_source="b.pdf",
-                model_name="gpt-4",
-                chunks_used=[],
-            ),
-        ]
+    def test_unknown_value_type_lowest_priority(self):
+        """Test that UNKNOWN value_type is used only as last resort."""
+        result = ExtractionResult(
+            field_name="test_field",
+            csv_id=1,
+            column="test_col",
+            data_type=FieldDataType.TEXT,
+            candidates=[
+                ExtractionCandidate(
+                    value="unknown_value",
+                    value_type=ValueType.UNKNOWN,
+                    confidence=0.99,  # High confidence
+                    source_pdf="unknown.pdf",
+                    evidence="Context unclear",
+                ),
+                ExtractionCandidate(
+                    value="preventivo_value",
+                    value_type=ValueType.PREVENTIVO,
+                    confidence=0.60,  # Lower confidence
+                    source_pdf="preventivo.pdf",
+                    evidence="Valore preventivato",
+                ),
+            ],
+        )
 
-        aggregator1 = ResultAggregator()
-        aggregator2 = ResultAggregator()
-        
-        result1 = aggregator1.aggregate(results)
-        result2 = aggregator2.aggregate(results)
+        aggregator = ResultAggregator()
+        aggregated = aggregator.aggregate_result(result)
 
-        # Should get identical results
-        assert result1["entrate_totali"]["value"] == result2["entrate_totali"]["value"]
-        assert result1["entrate_totali"]["tipo_bilancio"] == result2["entrate_totali"]["tipo_bilancio"]
+        # PREVENTIVO should win over UNKNOWN despite lower confidence
+        assert aggregated.value == "preventivo_value"
+        assert aggregated.value_type == ValueType.PREVENTIVO

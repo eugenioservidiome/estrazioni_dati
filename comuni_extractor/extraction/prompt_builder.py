@@ -42,14 +42,14 @@ class PromptBuilder:
 
         prompt = (
             f"Extract the following field from the provided document excerpt:\n\n"
-            f"FIELD NAME: {field.field_name}\n"
+            f"FIELD NAME: {field.name}\n"
             f"DESCRIPTION: {field.description}\n"
             f"TYPE: {field.data_type.value}\n"
         )
 
         # Add field validators if present
-        if field.regex:
-            prompt += f"FORMAT: Must match regex: {field.regex}\n"
+        if field.regex_pattern:
+            prompt += f"FORMAT: Must match regex: {field.regex_pattern}\n"
 
         if field.query_templates:
             prompt += f"SEARCH HINTS: {', '.join(field.query_templates)}\n"
@@ -82,7 +82,7 @@ class PromptBuilder:
         context = "\n\n".join(chunks[:5])
 
         fields_spec = "\n".join(
-            f"  - {f.field_name} ({f.data_type.value}): {f.description}"
+            f"  - {f.name} ({f.data_type.value}): {f.description}"
             for f in fields
         )
 

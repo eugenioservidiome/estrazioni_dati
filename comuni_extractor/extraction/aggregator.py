@@ -32,7 +32,13 @@ class ResultAggregator:
             by_type[cand.value_type].append(cand)
 
         # Priority order
-        priority = [ValueType.DEFINITIVO, ValueType.CONSUNTIVO, ValueType.PREVISIONE, ValueType.PREVENTIVO]
+        priority = [
+            ValueType.DEFINITIVO,
+            ValueType.CONSUNTIVO,
+            ValueType.PREVISIONE,
+            ValueType.PREVENTIVO,
+            ValueType.UNKNOWN,
+        ]
 
         # Find best value
         for value_type in priority:

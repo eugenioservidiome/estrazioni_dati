@@ -12,29 +12,41 @@ import pandas as pd
 class CSVHandler:
     """Handle CSV file operations with glob support and schema preservation."""
 
-    def __init__(self, drive_dataset_path: str | Path):
+    def __init__(
+        self,
+        source_dataset_path: str | Path,
+        output_dir: Optional[str | Path] = None,
+    ):
         """Initialize CSV handler.
         
         Args:
-            drive_dataset_path: Path to dataset folder containing CSV files
+            source_dataset_path: Path to dataset folder containing template CSV files
+            output_dir: Path to output directory for modified CSVs (optional)
         """
-        self.drive_dataset_path = Path(drive_dataset_path)
-        self.csv_files: Dict[int, Path] = {}
+        self.source_dataset_path = Path(source_dataset_path)
+        self.output_dir = Path(output_dir) if output_dir else None
+        self.csv_templates: Dict[int, Path] = {}
+        self.csv_output_paths: Dict[int, Path] = {}
         self._discover_csv_files()
 
     def _discover_csv_files(self) -> None:
-        """Discover CSV files using glob patterns."""
+        """Discover CSV template files using glob patterns."""
         # Standard CSV files (01_governo, 03_risultati_pillole, etc.)
         for csv_id in [1, 3, 4, 5, 6]:
             pattern = f"{csv_id:02d}_*.csv"
-            matches = list(self.drive_dataset_path.glob(pattern))
+            matches = list(self.source_dataset_path.glob(pattern))
             if matches:
-                self.csv_files[csv_id] = matches[0]
+                self.csv_templates[csv_id] = matches[0]
+                if self.output_dir:
+                    # Use same filename in output directory
+                    self.csv_output_paths[csv_id] = self.output_dir / matches[0].name
 
         # Special handling for 02_territorio_popolazione*.csv
-        matches_02 = list(self.drive_dataset_path.glob("02_*.csv"))
+        matches_02 = list(self.source_dataset_path.glob("02_*.csv"))
         if matches_02:
-            self.csv_files[2] = matches_02[0]
+            self.csv_templates[2] = matches_02[0]
+            if self.output_dir:
+                self.csv_output_paths[2] = self.output_dir / matches_02[0].name
 
     @staticmethod
     def _detect_encoding(file_path: Path) -> str:
@@ -47,23 +59,36 @@ class CSVHandler:
     def load_csv(self, csv_id: int) -> Optional[pd.DataFrame]:
         """Load a CSV file by ID.
         
+        Prefers output CSV if it exists; otherwise loads from template.
+        
         Args:
             csv_id: CSV file ID (1-6)
             
         Returns:
             DataFrame or None if file not found
         """
-        if csv_id not in self.csv_files:
+        if csv_id not in self.csv_templates:
             return None
 
-        file_path = self.csv_files[csv_id]
-        encoding = self._detect_encoding(file_path)
+        # Try to load from output directory first
+        if self.output_dir and csv_id in self.csv_output_paths:
+            output_path = self.csv_output_paths[csv_id]
+            if output_path.exists():
+                encoding = self._detect_encoding(output_path)
+                try:
+                    return pd.read_csv(output_path, encoding=encoding)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to load output CSV {csv_id} from {output_path}: {e}")
+
+        # Fall back to template
+        template_path = self.csv_templates[csv_id]
+        encoding = self._detect_encoding(template_path)
 
         try:
-            df = pd.read_csv(file_path, encoding=encoding)
+            df = pd.read_csv(template_path, encoding=encoding)
             return df
         except Exception as e:
-            raise RuntimeError(f"Failed to load CSV {csv_id} from {file_path}: {e}")
+            raise RuntimeError(f"Failed to load template CSV {csv_id} from {template_path}: {e}")
 
     def load_all_csvs(self) -> Dict[int, pd.DataFrame]:
         """Load all available CSVs.
@@ -77,6 +102,26 @@ class CSVHandler:
             if df is not None:
                 result[csv_id] = df
         return result
+
+    def save_csv(self, csv_id: int, df: pd.DataFrame) -> None:
+        """Save DataFrame to output directory.
+        
+        Args:
+            csv_id: CSV file ID
+            df: DataFrame to save
+            
+        Raises:
+            ValueError: If output_dir not configured or csv_id not found
+        """
+        if not self.output_dir:
+            raise ValueError("Cannot save CSV: output_dir not configured")
+
+        if csv_id not in self.csv_output_paths:
+            raise ValueError(f"Cannot save CSV: csv_id {csv_id} not found in templates")
+
+        output_path = self.csv_output_paths[csv_id]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False, encoding="utf-8")
 
     @staticmethod
     def find_or_create_row(
@@ -153,7 +198,7 @@ class CSVHandler:
         value: str,
         overwrite: bool = False,
     ) -> bool:
-        """Update a value in CSV.
+        """Update a value in CSV and save to output directory.
         
         Args:
             csv_id: CSV file ID
@@ -184,6 +229,11 @@ class CSVHandler:
         current_val = df.loc[row_idx, column]
         if pd.isna(current_val) or overwrite:
             df.loc[row_idx, column] = value
+            
+            # Save to output directory
+            if self.output_dir:
+                self.save_csv(csv_id, df)
+            
             return True
 
         return False

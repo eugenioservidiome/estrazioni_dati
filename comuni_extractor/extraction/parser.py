@@ -30,12 +30,13 @@ class ResponseParser:
 
             if data is None:
                 return ExtractionResult(
-                    field_name=field.field_name,
+                    field_name=field.name,
                     csv_id=field.csv_id,
+                    column=field.column,
+                    data_type=field.data_type,
                     value=None,
                     confidence=0.0,
-                    extraction_type="parse_error",
-                    error="No JSON found in response",
+                    extraction_errors=["No JSON found in response"],
                 )
 
             value = data.get("value")
@@ -45,21 +46,23 @@ class ResponseParser:
             confidence = max(0.0, min(1.0, confidence))
 
             return ExtractionResult(
-                field_name=field.field_name,
+                field_name=field.name,
                 csv_id=field.csv_id,
+                column=field.column,
+                data_type=field.data_type,
                 value=value,
                 confidence=confidence,
-                extraction_type="llm",
             )
 
         except Exception as e:
             return ExtractionResult(
-                field_name=field.field_name,
+                field_name=field.name,
                 csv_id=field.csv_id,
+                column=field.column,
+                data_type=field.data_type,
                 value=None,
                 confidence=0.0,
-                extraction_type="parse_error",
-                error=str(e),
+                extraction_errors=[str(e)],
             )
 
     @staticmethod
@@ -87,9 +90,11 @@ class ResponseParser:
                     name: ExtractionResult(
                         field_name=name,
                         csv_id=field.csv_id,
+                        column=field.column,
+                        data_type=field.data_type,
                         value=None,
                         confidence=0.0,
-                        extraction_type="parse_error",
+                        extraction_errors=["No JSON found in response"],
                     )
                     for name, field in fields.items()
                 }
@@ -111,17 +116,19 @@ class ResponseParser:
                     results[field_name] = ExtractionResult(
                         field_name=field_name,
                         csv_id=field.csv_id,
+                        column=field.column,
+                        data_type=field.data_type,
                         value=value,
                         confidence=confidence,
-                        extraction_type="llm",
                     )
                 else:
                     results[field_name] = ExtractionResult(
                         field_name=field_name,
                         csv_id=field.csv_id,
+                        column=field.column,
+                        data_type=field.data_type,
                         value=None,
                         confidence=0.0,
-                        extraction_type="not_found",
                     )
 
         except Exception as e:
@@ -130,10 +137,11 @@ class ResponseParser:
                 name: ExtractionResult(
                     field_name=name,
                     csv_id=field.csv_id,
+                    column=field.column,
+                    data_type=field.data_type,
                     value=None,
                     confidence=0.0,
-                    extraction_type="parse_error",
-                    error=str(e),
+                    extraction_errors=[str(e)],
                 )
                 for name, field in fields.items()
             }
