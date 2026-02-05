@@ -15,6 +15,7 @@ class ValueType(str, Enum):
     PREVISIONE = "previsione"
     CONSUNTIVO = "consuntivo"
     PREVENTIVO = "preventivo"
+    UNKNOWN = "unknown"
 
 
 class FieldDataType(str, Enum):

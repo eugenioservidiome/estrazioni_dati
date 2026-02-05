@@ -42,40 +42,42 @@ class TestCrawlerDomainScoping:
             """Mock HTTP GET responses."""
             mock_resp = Mock()
             if "comune.example.it" in url and "page1" in url:
-                mock_resp.text = page1_html
-                mock_resp.status_code = 200
+                return page1_html
             elif "comune.example.it" in url:
-                mock_resp.text = main_page_html
-                mock_resp.status_code = 200
+                return main_page_html
             else:
                 # External domains should never be called
                 raise AssertionError(f"Crawler tried to visit external domain: {url}")
-            return mock_resp
 
-        mock_client_instance.get.side_effect = mock_get
+        mock_client_instance.get_text.side_effect = mock_get
 
         # Run crawler
         crawler = Crawler(
-            start_url="https://comune.example.it/",
             http_client=mock_client_instance,
             max_pages=10,
             max_depth=2,
             allowed_domains=["comune.example.it"],
         )
 
-        discovered_pdfs = crawler.crawl()
+        discovered_pdfs = crawler.start_crawl("https://comune.example.it/")
 
-        # Assertions
-        # Should find both internal and external PDFs
+        # Assertions: Should find only INTERNAL PDFs (from allowed domain)
+        # External PDFs should be filtered out
         assert len(discovered_pdfs) >= 2
 
-        # Check that external PDFs were discovered (but not crawled)
+        # Check that ONLY internal PDFs were discovered  
         pdf_urls = [pdf.pdf_url for pdf in discovered_pdfs]
-        assert any("servizipubblicaamministrazione.it" in url for url in pdf_urls)
+        
+        # Internal PDFs should be present
         assert any("comune.example.it/docs/file.pdf" in url for url in pdf_urls)
+        assert any("comune.example.it/docs/documento.pdf" in url for url in pdf_urls)
+        
+        # External PDFs should NOT be discovered (filtered out by allowed_domains)
+        assert not any("servizipubblicaamministrazione.it" in url for url in pdf_urls)
+        assert not any("other-comune.it" in url for url in pdf_urls)
 
-        # Verify HTTP client was NOT called for external domains
-        called_urls = [call[0][0] for call in mock_client_instance.get.call_args_list]
+        # Verify HTTP client was NOT called for external domains (pages)
+        called_urls = [call[0][0] for call in mock_client_instance.get_text.call_args_list]
         for url in called_urls:
             assert "comune.example.it" in url, f"Crawler visited external domain: {url}"
 
@@ -93,18 +95,14 @@ class TestCrawlerDomainScoping:
         </html>
         """
 
-        mock_resp = Mock()
-        mock_resp.text = html
-        mock_resp.status_code = 200
-        mock_client_instance.get.return_value = mock_resp
+        mock_client_instance.get_text.return_value = html
 
         crawler = Crawler(
-            start_url="https://comune.test.it/",
             http_client=mock_client_instance,
             max_pages=1,
         )
 
-        discovered_pdfs = crawler.crawl()
+        discovered_pdfs = crawler.start_crawl("https://comune.test.it/")
 
         # Should find the PDF
         assert len(discovered_pdfs) == 1
@@ -133,18 +131,14 @@ class TestCrawlerDomainScoping:
         </html>
         """
 
-        mock_resp = Mock()
-        mock_resp.text = html
-        mock_resp.status_code = 200
-        mock_client_instance.get.return_value = mock_resp
+        mock_client_instance.get_text.return_value = html
 
         crawler = Crawler(
-            start_url="https://comune.test.it/",
             http_client=mock_client_instance,
             max_pages=1,
         )
 
-        discovered_pdfs = crawler.crawl()
+        discovered_pdfs = crawler.start_crawl("https://comune.test.it/")
 
         # Should find 2 unique PDFs (different query strings)
         # The duplicate with same query string should be deduplicated

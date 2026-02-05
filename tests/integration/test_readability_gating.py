@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 
-from comuni_extractor.documents.pdf_extractor import PDFTextExtractor, is_readable_text
+from comuni_extractor.documents.pdf_extractor import is_readable_text
 from comuni_extractor.pipeline.orchestrator import PipelineOrchestrator
 
 
@@ -40,91 +40,127 @@ class TestReadabilityGating:
 
     def test_is_readable_text_low_alpha_ratio(self):
         """Test that text with too many non-alpha chars fails."""
-        # 50 chars total, only 20 alpha (40% ratio)
-        low_alpha = "a" * 20 + "1234567890!@#$%^&*()" * 1.5
+        # 50 chars total, only 20 alpha (40% ratio < 0.5 threshold)
+        low_alpha = "a" * 20 + "1234567890!@#$%^&*()" + "1234567890"
         
         result = is_readable_text(low_alpha, min_chars=40, min_alpha_ratio=0.5)
         assert result is False
 
-    @patch("comuni_extractor.pipeline.orchestrator.PDFTextExtractor")
+    @patch("comuni_extractor.pipeline.orchestrator.extract_text_from_pdf")
     @patch("comuni_extractor.pipeline.orchestrator.LLMClient")
     def test_orchestrator_skips_llm_on_unreadable_pdf(
-        self, mock_llm_client_class, mock_pdf_extractor_class, tmp_path
+        self, mock_llm_client_class, mock_extract_pdf, tmp_path
     ):
         """Test that orchestrator doesn't call LLM for unreadable PDFs."""
-        # Setup
+        from comuni_extractor.config import AppConfig
+        from comuni_extractor.models import FieldSpec, FieldDataType
+        from comuni_extractor.io.guide_parser import GuideParser
+        
+        # Setup paths
         pdf_dir = tmp_path / "pdfs"
         output_dir = tmp_path / "output"
-        guide_path = tmp_path / "guida_compilazione.csv"
+        guide_path = tmp_path / "guide.md"
+        dataset_path = tmp_path / "dataset"
         
         pdf_dir.mkdir()
         output_dir.mkdir()
+        dataset_path.mkdir()
         
-        # Create simple guide file
+        # Create test CSV templates
+        for csv_id in [1, 2, 3, 4, 5, 6]:
+            csv_file = dataset_path / f"{csv_id:02d}_test.csv"
+            csv_file.write_text("comune,anno\n")
+        
+        # Create simple guide
         guide_path.write_text(
-            "anno,tipo_bilancio,campo,descrizione\n"
-            "2023,previsione,entrate_totali,Entrate totali previste\n"
+            "# Guide\\n\\n## campo1\\ndescrizione\\ncsv_id: 1\\ncolumn: test_col"
         )
 
         # Create a test PDF
         test_pdf = pdf_dir / "test.pdf"
-        test_pdf.write_bytes(b"PDF content")  # Dummy bytes
+        test_pdf.write_bytes(b"<PDF content>")  # Dummy
 
-        # Mock PDF extractor to return unreadable text
-        mock_extractor_instance = Mock()
-        mock_extractor_instance.extract_text.return_value = "|||###123" * 5  # Garbage
-        mock_pdf_extractor_class.return_value = mock_extractor_instance
+        # Mock extract_text_from_pdf to return  unreadable text
+        mock_extract_pdf.return_value = "|||###123" * 10  # Garbage
 
         # Mock LLM client
         mock_llm_instance = Mock()
         mock_llm_client_class.return_value = mock_llm_instance
 
+        # Create config
+        config = AppConfig()
+        config.paths.drive_dataset_path = str(dataset_path)
+        config.paths.output_root = str(output_dir)
+
         # Create orchestrator
         orchestrator = PipelineOrchestrator(
-            comune="test",
-            year="2023",
-            output_dir=output_dir,
+            config=config,
+            comune="testcomune",
+            year=2023,
+            openai_key="test-key",
         )
 
-        # Run analyze phase
-        report = orchestrator.run_analyze(
-            pdf_dir=pdf_dir,
-            guide_path=guide_path,
-            overwrite=False,
-        )
+        # Mock GuideParser
+        with patch.object(GuideParser, "parse") as mock_parse:
+            mock_parse.return_value = [
+                FieldSpec(
+                    name="campo1",
+                    csv_id=1,
+                    column="test_col",
+                    description="test field",
+                    data_type=FieldDataType.TEXT,
+                )
+            ]
 
-        # Assertions
-        # LLM client should NOT have been called for unreadable PDF
-        assert mock_llm_instance.extract_fields.call_count == 0
+            # Run analyze
+            report = orchestrator.run_analyze(
+                pdf_dir=pdf_dir,
+                guide_path=guide_path,
+                overwrite=False,
+            )
+
+        # Verify: LLM should NOT be called because PDF was unreadable
+        assert mock_llm_instance.extract_field_candidates.call_count == 0
         
-        # PDF should be in failed/skipped count
-        assert report.stats["pdfs_failed"] >= 1 or report.stats.get("pdfs_skipped", 0) >= 1
+        # Verify stats show failed PDF
+        assert report.stats.download_stats.pdfs_failed > 0
+        assert report.stats.download_stats.pdfs_successful == 0
 
-    @patch("comuni_extractor.pipeline.orchestrator.PDFTextExtractor")
+    @patch("comuni_extractor.pipeline.orchestrator.extract_text_from_pdf")
     @patch("comuni_extractor.pipeline.orchestrator.LLMClient")
     def test_orchestrator_calls_llm_on_readable_pdf(
-        self, mock_llm_client_class, mock_pdf_extractor_class, tmp_path
+        self, mock_llm_client_class, mock_extract_pdf, tmp_path
     ):
         """Test that orchestrator DOES call LLM for readable PDFs."""
-        # Setup
+        from comuni_extractor.config import AppConfig
+        from comuni_extractor.models import FieldSpec, FieldDataType
+        from comuni_extractor.io.guide_parser import GuideParser
+        
+        # Setup paths
         pdf_dir = tmp_path / "pdfs"
         output_dir = tmp_path / "output"
-        guide_path = tmp_path / "guida_compilazione.csv"
+        guide_path = tmp_path / "guide.md"
+        dataset_path = tmp_path / "dataset"
         
         pdf_dir.mkdir()
         output_dir.mkdir()
+        dataset_path.mkdir()
         
-        # Create guide file
+        # Create test CSV templates
+        for csv_id in [1, 2, 3, 4, 5, 6]:
+            csv_file = dataset_path / f"{csv_id:02d}_test.csv"
+            csv_file.write_text("comune,anno\n")
+        
+        # Create simple guide
         guide_path.write_text(
-            "anno,tipo_bilancio,campo,descrizione\n"
-            "2023,previsione,entrate_totali,Entrate totali previste\n"
+            "# Guide\\n\\n## campo1\\ndescrizione\\ncsv_id: 1\\ncolumn: test_col"
         )
 
-        # Create test PDF
-        test_pdf = pdf_dir / "bilancio.pdf"
-        test_pdf.write_bytes(b"PDF content")
+        # Create a test PDF
+        test_pdf = pdf_dir / "test.pdf"
+        test_pdf.write_bytes(b"<PDF content>")  # Dummy
 
-        # Mock PDF extractor to return READABLE text
+        # Mock extract_text_from_pdf to return READABLE text
         readable_text = """
         Bilancio di Previsione 2023
         Comune di Test
@@ -134,41 +170,49 @@ class TestReadabilityGating:
         Investimenti: 300.000 euro
         """ * 5  # Enough text to pass readability
         
-        mock_extractor_instance = Mock()
-        mock_extractor_instance.extract_text.return_value = readable_text
-        mock_pdf_extractor_class.return_value = mock_extractor_instance
+        mock_extract_pdf.return_value = readable_text
 
-        # Mock LLM client to return extraction result
+        # Mock LLM client
         mock_llm_instance = Mock()
-        mock_result = Mock()
-        mock_result.extracted_fields = {"entrate_totali": "1500000"}
-        mock_result.confidence_score = 0.9
-        mock_result.model_name = "gpt-4"
-        mock_result.tipo_bilancio = "previsione"
-        mock_result.chunks_used = []
-        mock_llm_instance.extract_fields.return_value = mock_result
         mock_llm_client_class.return_value = mock_llm_instance
+
+        # Create config
+        config = AppConfig()
+        config.paths.drive_dataset_path = str(dataset_path)
+        config.paths.output_root = str(output_dir)
 
         # Create orchestrator
         orchestrator = PipelineOrchestrator(
-            comune="test",
-            year="2023",
-            output_dir=output_dir,
+            config=config,
+            comune="testcomune",
+            year=2023,
+            openai_key="test-key",
         )
 
-        # Run analyze phase
-        report = orchestrator.run_analyze(
-            pdf_dir=pdf_dir,
-            guide_path=guide_path,
-            overwrite=False,
-        )
+        # Mock GuideParser
+        with patch.object(GuideParser, "parse") as mock_parse:
+            mock_parse.return_value = [
+                FieldSpec(
+                    name="campo1",
+                    csv_id=1,
+                    column="test_col",
+                    description="test field",
+                    data_type=FieldDataType.TEXT,
+                )
+            ]
 
-        # Assertions
-        # LLM should have been called for readable PDF
-        assert mock_llm_instance.extract_fields.call_count >= 1
+            # Run analyze
+            report = orchestrator.run_analyze(
+                pdf_dir=pdf_dir,
+                guide_path=guide_path,
+                overwrite=False,
+            )
+
+        # Verify: LLM SHOULD be called because PDF was readable
+        assert mock_llm_instance.extract_field_candidates.call_count > 0
         
-        # PDF should be in downloaded (processed) count
-        assert report.stats.get("pdfs_downloaded", 0) >= 1
+        # Verify stats show successful PDF processing
+        assert report.stats.download_stats.pdfs_successful > 0
 
     def test_configurable_readability_thresholds(self):
         """Test that readability thresholds can be configured."""

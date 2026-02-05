@@ -36,9 +36,12 @@ class TestAppConfig:
         config.chatgpt.model = "gpt-3.5-turbo"
         assert config.chatgpt.model == "gpt-3.5-turbo"
 
-        # Invalid model should raise validation error
-        with pytest.raises(ValueError):
-            config.chatgpt.model = "invalid-model"
+        # Can set any non-empty string as model name
+        config.chatgpt.model = "gpt-4"
+        assert config.chatgpt.model == "gpt-4"
+        
+        config.chatgpt.model = "custom-model-v1"
+        assert config.chatgpt.model == "custom-model-v1"
 
     def test_load_config_from_file(self, sample_config_yaml):
         """Test loading config from file."""

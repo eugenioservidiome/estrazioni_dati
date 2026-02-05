@@ -54,11 +54,16 @@ class FieldNormalizer:
             # Remove common separators
             cleaned = re.sub(r'[\s\-().]', '', value.strip())
 
-            # Handle +39 prefix
+            # Handle Italian international prefix
             if cleaned.startswith('+39'):
-                cleaned = '0' + cleaned[3:]
-            elif cleaned.startswith('39'):
-                cleaned = '0' + cleaned[2:]
+                # Remove +39, number should already have leading 0
+                cleaned = cleaned[3:]
+            elif cleaned.startswith('0039'):
+                # Remove 0039, number should already have leading 0
+                cleaned = cleaned[4:]
+            elif cleaned.startswith('39') and len(cleaned) > 9:
+                # Remove 39 prefix if it looks like international format
+                cleaned = cleaned[2:]
 
             # Ensure it starts with 0
             if not cleaned.startswith('0'):

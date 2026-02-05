@@ -5,6 +5,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from comuni_extractor.retrieval.chunker import TextChunk
+
 
 class TFIDFIndexer:
     """Build and search TF-IDF indexes."""
@@ -31,22 +33,22 @@ class TFIDFIndexer:
 
         self.vectorizer: Optional[TfidfVectorizer] = None
         self.tfidf_matrix = None
-        self.chunks: List[str] = []
-        self.chunk_ids: List[str] = []
+        self.chunks: List[TextChunk] = []
 
-    def build(self, chunks: List[Tuple[str, str]]) -> None:
+    def build(self, chunks: List[TextChunk]) -> None:
         """Build TF-IDF index from chunks.
         
         Args:
-            chunks: List of (chunk_id, chunk_text) tuples
+            chunks: List of TextChunk objects
         """
         if not chunks:
             raise ValueError("No chunks provided")
 
-        # Separate IDs and texts
-        self.chunk_ids, self.chunks = zip(*chunks)
-        self.chunk_ids = list(self.chunk_ids)
-        self.chunks = list(self.chunks)
+        # Store chunks
+        self.chunks = chunks
+
+        # Extract texts for vectorization
+        chunk_texts = [chunk.text for chunk in chunks]
 
         # Build vectorizer
         self.vectorizer = TfidfVectorizer(
@@ -55,13 +57,13 @@ class TFIDFIndexer:
             min_df=self.min_df,
             max_df=self.max_df,
             lowercase=True,
-            stop_words="english",  # TODO: Add Italian stop words
+            stop_words=None,  # Don't use English stop words for Italian texts
         )
 
         # Fit and transform
-        self.tfidf_matrix = self.vectorizer.fit_transform(self.chunks)
+        self.tfidf_matrix = self.vectorizer.fit_transform(chunk_texts)
 
-    def search(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
+    def search(self, query: str, top_k: int = 5) -> List[Tuple[TextChunk, float]]:
         """Search for query in index.
         
         Args:
@@ -69,7 +71,7 @@ class TFIDFIndexer:
             top_k: Number of results to return
             
         Returns:
-            List of (chunk_id, relevance_score) tuples sorted by score descending
+            List of (TextChunk, relevance_score) tuples sorted by score descending
         """
         if self.vectorizer is None or self.tfidf_matrix is None:
             raise ValueError("Index not built. Call build() first.")
@@ -84,42 +86,41 @@ class TFIDFIndexer:
         # Get top-k
         top_indices = np.argsort(scores)[::-1][:top_k]
         results = [
-            (self.chunk_ids[i], float(scores[i]))
+            (self.chunks[i], float(scores[i]))
             for i in top_indices
             if scores[i] > 0
         ]
 
         return results
 
-    def get_chunk(self, chunk_id: str) -> Optional[str]:
-        """Get chunk text by ID.
+    def get_chunk(self, chunk_id: str) -> Optional[TextChunk]:
+        """Get chunk by ID.
         
         Args:
             chunk_id: Chunk identifier
             
         Returns:
-            Chunk text or None
+            TextChunk or None
         """
-        try:
-            idx = self.chunk_ids.index(chunk_id)
-            return self.chunks[idx]
-        except (ValueError, IndexError):
-            return None
+        for chunk in self.chunks:
+            if chunk.chunk_id == chunk_id:
+                return chunk
+        return None
 
-    def get_chunks_by_ids(self, chunk_ids: List[str]) -> dict[str, str]:
+    def get_chunks_by_ids(self, chunk_ids: List[str]) -> List[TextChunk]:
         """Get multiple chunks by IDs.
         
         Args:
             chunk_ids: List of chunk IDs
             
         Returns:
-            Dict mapping chunk_id to text
+            List of TextChunk objects
         """
-        result = {}
+        result = []
         for chunk_id in chunk_ids:
-            text = self.get_chunk(chunk_id)
-            if text:
-                result[chunk_id] = text
+            chunk = self.get_chunk(chunk_id)
+            if chunk:
+                result.append(chunk)
         return result
 
     def is_built(self) -> bool:

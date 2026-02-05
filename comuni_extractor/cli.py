@@ -213,7 +213,7 @@ def analyze(
         
         # Load config
         config = load_config(str(config_file) if config_file else None)
-        config.paths.data_dir = drive_path
+        config.paths.drive_dataset_path = str(drive_path)
         
         # Count PDFs
         pdf_count = len(list(pdf_dir.glob("*.pdf")))

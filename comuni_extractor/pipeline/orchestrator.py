@@ -1,37 +1,39 @@
 """Pipeline orchestrator."""
 
-import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from comuni_extractor.config import AppConfig
-from comuni_extractor.crawl.discovery import URLDiscovery
+from comuni_extractor.documents.pdf_extractor import (
+    compute_pdf_hash,
+    extract_text_from_pdf,
+    is_readable_text,
+)
 from comuni_extractor.extraction.aggregator import ResultAggregator
 from comuni_extractor.extraction.llm_client import LLMClient
-from comuni_extractor.extraction.parser import ResponseParser
-from comuni_extractor.extraction.prompt_builder import PromptBuilder
-from comuni_extractor.http.client import HTTPClient
-from comuni_extractor.io.checkpoint import CheckpointManager
 from comuni_extractor.io.csv_handler import CSVHandler
 from comuni_extractor.io.guide_parser import GuideParser
 from comuni_extractor.io.report import ReportGenerator
 from comuni_extractor.models import (
-    CheckpointState,
-    Document,
     ExtractionResult,
+    ExtractionStats,
     FieldSpec,
+    ProcessingError,
     RunReport,
     RunStats,
 )
 from comuni_extractor.normalization.comune_name import normalize_comune_name
+from comuni_extractor.normalization.normalizers import FieldNormalizer
+from comuni_extractor.normalization.validators import FieldValidator
+from comuni_extractor.paths import ComunePaths
 from comuni_extractor.retrieval.chunker import TextChunker
 from comuni_extractor.retrieval.indexer import TFIDFIndexer
 
 
 class PipelineOrchestrator:
-    """Coordinate the complete extraction pipeline."""
+    """Coordinate the extraction pipeline."""
 
     def __init__(
         self,
@@ -44,221 +46,333 @@ class PipelineOrchestrator:
         
         Args:
             config: Application configuration
-            comune: Municipality (comune) name
-            year: Year for extraction
-            openai_key: OpenAI API key
+            comune: Municipality name
+            year: Reference year
+            openai_key: OpenAI API key (overrides config)
         """
         self.config = config
         self.comune = normalize_comune_name(comune)
         self.year = year
-        self.openai_key = openai_key or config.chatgpt.api_key
+        self.openai_key = openai_key or config.openai_api_key
+
+        # Setup paths
+        self.paths = ComunePaths.from_root(
+            output_root=config.paths.output_root,
+            comune=self.comune,
+            year=year,
+        )
+        self.paths.ensure_directories()
 
         # Initialize components
-        self.http_client = HTTPClient(
-            cache_dir=str(config.paths.cache_dir),
-            rate_limit_delay=config.crawling.rate_limit,
-        )
-
-        self.discovery = URLDiscovery(
-            self.http_client,
-            max_pages=config.crawling.max_pages,
-            max_depth=config.crawling.max_depth,
-            respect_robots=config.crawling.respect_robots,
-        )
-
         self.llm_client = LLMClient(
             api_key=self.openai_key,
             model=config.chatgpt.model,
             temperature=config.chatgpt.temperature,
-            cache_dir=str(config.paths.cache_dir / "llm_responses"),
+            cache_dir=self.paths.cache_dir / "llm",
         )
 
-        self.csv_handler = CSVHandler(config.paths.data_dir)
-        self.checkpoint_manager = CheckpointManager(config.paths.cache_dir)
-        self.report_generator = ReportGenerator(config.paths.output_dir)
+        self.csv_handler = CSVHandler(
+            source_dataset_path=config.paths.drive_dataset_path,
+            output_dir=self.paths.output_dir,
+        )
 
-        # Tracking
+        self.report_generator = ReportGenerator(self.paths.output_dir)
+
+        # Stats tracking
         self.stats = RunStats()
+        self.errors: List[ProcessingError] = []
+        self.warnings: List[str] = []
         self.results: List[ExtractionResult] = []
 
-    def run(
+    def run_analyze(
         self,
-        site_url: str,
+        pdf_dir: Path,
         guide_path: Path,
-        max_pdfs: Optional[int] = None,
-        dry_run: bool = False,
+        overwrite: bool = False,
     ) -> RunReport:
-        """Run complete pipeline.
+        """Run analysis on local PDFs.
         
         Args:
-            site_url: Municipality site URL
-            guide_path: Path to GUIDA.md
-            max_pdfs: Max PDFs to process
-            dry_run: Don't write outputs
+            pdf_dir: Directory containing PDFs
+            guide_path: Path to guide file (GUIDA.md or CSV)
+            overwrite: Overwrite existing CSV values
             
         Returns:
-            Run report
+            RunReport with results
         """
+        self.stats.start_time = datetime.utcnow()
+        
         try:
-            # Load guide
-            guide_parser = GuideParser()
-            fields = guide_parser.parse(guide_path)
+            # Phase 1: Parse guide
+            self._log("Parsing field specifications from guide...")
+            guide_parser = GuideParser(guide_path)
+            fields = guide_parser.parse()
+            self._log(f"Loaded {len(fields)} field specifications")
 
-            # Phase 1: URL discovery
-            self._log("Discovering PDF URLs...")
-            pdf_urls = self.discovery.discover_pdfs(site_url)
-            self.stats.pages_crawled = len(pdf_urls)
+            # Phase 2: Extract and filter text from PDFs
+            self._log("Extracting text from PDFs...")
+            documents_data = self._extract_pdf_texts(pdf_dir)
+            
+            if not documents_data:
+                self._log("No readable PDFs found", level="warning")
+                return self._generate_report(fields, "No readable PDFs")
 
-            if not pdf_urls:
-                self._log("No PDF URLs found")
-                return self._generate_report(fields, "No PDFs found")
+            # Phase 3: Chunk and index
+            self._log("Chunking and indexing text...")
+            all_chunks = self._chunk_documents(documents_data)
+            
+            indexer = TFIDFIndexer(
+                ngram_range=(
+                    self.config.retrieval.ngram_range_min,
+                    self.config.retrieval.ngram_range_max,
+                ),
+                max_features=self.config.retrieval.max_features,
+            )
+            indexer.build(all_chunks)
+            self._log(f"Indexed {len(all_chunks)} text chunks")
 
-            # Phase 2: Download PDFs
-            self._log(f"Downloading {len(pdf_urls)} PDFs...")
-            documents = self._download_pdfs(pdf_urls, max_pdfs)
+            # Phase 4: Extract fields with LLM
+            self._log("Extracting fields with LLM...")
+            self._extract_fields(fields, indexer)
 
-            if not documents:
-                self._log("No PDFs successfully downloaded")
-                return self._generate_report(fields, "PDF download failed")
+            # Phase 5: Normalize and validate
+            self._log("Normalizing and validating values...")
+            self._normalize_and_validate_results()
 
-            # Phase 3: Extract and index text
-            self._log("Extracting and indexing text...")
-            chunker = TextChunker()
-            chunks = self._chunk_documents(documents, chunker)
+            # Phase 6: Aggregate candidates
+            self._log("Aggregating extraction candidates...")
+            self._aggregate_results()
 
-            indexer = TFIDFIndexer()
-            indexer.build(chunks)
+            # Phase 7: Update CSVs
+            self._log("Updating CSV files...")
+            self._update_csvs(fields, overwrite)
 
-            # Phase 4: Extract fields
-            self._log("Extracting fields...")
-            self._extract_fields(fields, chunks, indexer)
-
-            # Phase 5: Update CSVs
-            if not dry_run:
-                self._log("Updating CSVs...")
-                self._update_csvs(fields)
-
-            # Phase 6: Generate report
+            # Phase 8: Generate report
             self._log("Generating report...")
+            self.stats.end_time = datetime.utcnow()
             report = self._generate_report(fields)
+            
+            report_path = self.report_generator.save_report(report)
+            self._log(f"Report saved: {report_path}")
 
             return report
 
         except Exception as e:
             self._log(f"Pipeline error: {str(e)}", level="error")
+            self.stats.end_time = datetime.utcnow()
+            self._add_error("pipeline_error", str(e), {"phase": "unknown"})
             return self._generate_report([], f"Pipeline error: {str(e)}")
 
-    def _download_pdfs(
-        self,
-        pdf_urls: List[str],
-        max_pdfs: Optional[int] = None,
-    ) -> List[Document]:
-        """Download PDFs.
+    def _extract_pdf_texts(self, pdf_dir: Path) -> List[dict]:
+        """Extract text from PDFs with readability gating.
         
         Args:
-            pdf_urls: List of PDF URLs
-            max_pdfs: Max PDFs to download
+            pdf_dir: Directory containing PDFs
             
         Returns:
-            List of documents
+            List of dicts with filename, text, hash
         """
-        documents = []
-        urls = pdf_urls[: max_pdfs or len(pdf_urls)]
-
-        for url in urls:
+        documents_data = []
+        pdf_files = list(pdf_dir.glob("*.pdf"))
+        
+        for pdf_path in pdf_files:
             try:
-                pdf_content = self.http_client.get(url)
-                # TODO: Create Document object and add to list
-                self.stats.pdfs_downloaded += 1
+                # Extract text
+                text = extract_text_from_pdf(pdf_path)
+                
+                # Readability gating
+                if not is_readable_text(text, min_chars=100, min_alpha_ratio=0.5):
+                    self._add_warning(f"Skipping unreadable PDF: {pdf_path.name}")
+                    self.stats.download_stats.pdfs_failed += 1
+                    continue
+                
+                # Compute hash
+                pdf_hash = compute_pdf_hash(pdf_path)
+                
+                documents_data.append({
+                    "filename": pdf_path.name,
+                    "text": text,
+                    "hash": pdf_hash,
+                    "path": str(pdf_path),
+                })
+                
+                self.stats.download_stats.pdfs_successful += 1
+                
+            except Exception as e:
+                self._add_error(
+                    "pdf_extraction_error",
+                    f"Failed to process {pdf_path.name}: {str(e)}",
+                    {"pdf": pdf_path.name},
+                )
+                self.stats.download_stats.pdfs_failed += 1
+        
+        return documents_data
 
-            except Exception:
-                self.stats.pdfs_failed += 1
-
-        return documents
-
-    def _chunk_documents(
-        self,
-        documents: List[Document],
-        chunker: TextChunker,
-    ) -> List:
-        """Chunk documents.
+    def _chunk_documents(self, documents_data: List[dict]) -> List:
+        """Chunk documents into text segments.
         
         Args:
-            documents: List of documents
-            chunker: Text chunker
+            documents_data: List of document dicts
             
         Returns:
-            List of chunks
+            List of TextChunk objects
         """
-        chunks = []
-
-        for doc in documents:
+        chunker = TextChunker(
+            chunk_size=self.config.pdf.chunk_size,
+            overlap=self.config.pdf.chunk_overlap,
+        )
+        
+        all_chunks = []
+        for doc_data in documents_data:
             try:
-                doc_chunks = chunker.chunk(doc.text, doc.doc_id)
-                chunks.extend(doc_chunks)
-
-            except Exception:
-                pass
-
-        return chunks
+                chunks = chunker.chunk(doc_data["text"], doc_data["filename"])
+                all_chunks.extend(chunks)
+            except Exception as e:
+                self._add_warning(f"Chunking failed for {doc_data['filename']}: {str(e)}")
+        
+        return all_chunks
 
     def _extract_fields(
         self,
         fields: List[FieldSpec],
-        chunks: List,
         indexer: TFIDFIndexer,
     ) -> None:
-        """Extract fields from chunks.
+        """Extract fields using LLM.
         
         Args:
             fields: Field specifications
-            chunks: Text chunks
-            indexer: TF-IDF indexer
+            indexer: Built TF-IDF indexer
         """
         for field in fields:
             try:
+                # Build query from field name, description, and templates
+                query_parts = [field.name, field.description]
+                if field.query_templates:
+                    # Substitute {year} placeholder
+                    templates = [t.replace("{year}", str(self.year)) for t in field.query_templates]
+                    query_parts.extend(templates)
+                query = " ".join(query_parts)
+                
                 # Retrieve relevant chunks
-                relevant_chunks = indexer.search(field.field_name, top_k=5)
-
-                # Extract using LLM
-                results = self.llm_client.extract_fields(
-                    chunks=[c for c, _ in relevant_chunks],
-                    fields=[field],
-                    document_hash="",
+                top_k = self.config.retrieval.top_k
+                relevant_chunks_scored = indexer.search(query, top_k=top_k)
+                
+                if not relevant_chunks_scored:
+                    self._add_warning(f"No relevant chunks found for field: {field.name}")
+                    self.stats.extraction_stats.fields_failed += 1
+                    continue
+                
+                # Extract chunks only (drop scores)
+                relevant_chunks = [chunk for chunk, score in relevant_chunks_scored]
+                
+                # Call LLM
+                result = self.llm_client.extract_field_candidates(
+                    field=field,
+                    chunks=relevant_chunks,
+                    year=self.year,
                 )
+                
+                self.results.append(result)
+                self.stats.extraction_stats.fields_processed += 1
+                self.stats.extraction_stats.llm_api_calls += 1
+                
+                if result.candidates:
+                    self._log(f"Extracted {len(result.candidates)} candidates for {field.name}")
+                
+            except Exception as e:
+                self._add_error(
+                    "field_extraction_error",
+                    f"Failed to extract field {field.name}: {str(e)}",
+                    {"field": field.name},
+                )
+                self.stats.extraction_stats.fields_failed += 1
+                self.stats.extraction_stats.llm_errors += 1
 
-                self.results.extend(results)
-                self.stats.fields_processed += 1
+    def _normalize_and_validate_results(self) -> None:
+        """Normalize and validate extraction results."""
+        normalizer = FieldNormalizer()
+        validator = FieldValidator()
+        
+        for result in self.results:
+            for candidate in result.candidates:
+                try:
+                    # Normalize value based on data type
+                    normalized = normalizer.normalize(
+                        candidate.value,
+                        result.data_type,
+                    )
+                    candidate.value = normalized
+                    
+                    # Validate (this might lower confidence or mark as invalid)
+                    is_valid = validator.validate(
+                        candidate.value,
+                        result.data_type,
+                    )
+                    
+                    if not is_valid:
+                        # Lower confidence for invalid values
+                        candidate.confidence *= 0.5
+                        self._add_warning(
+                            f"Validation failed for {result.field_name} = {candidate.value}"
+                        )
+                    
+                except Exception as e:
+                    self._add_warning(
+                        f"Normalization/validation error for {result.field_name}: {str(e)}"
+                    )
 
-            except Exception:
-                pass
+    def _aggregate_results(self) -> None:
+        """Aggregate candidates in extraction results."""
+        aggregator = ResultAggregator()
+        
+        for result in self.results:
+            if result.candidates:
+                aggregator.aggregate_result(result)
+                
+                if result.value:
+                    self.stats.extraction_stats.fields_extracted += 1
 
-    def _update_csvs(self, fields: List[FieldSpec]) -> None:
-        """Update CSV files with results.
+    def _update_csvs(
+        self,
+        fields: List[FieldSpec],
+        overwrite: bool,
+    ) -> None:
+        """Update CSV files with extraction results.
         
         Args:
             fields: Field specifications
+            overwrite: Whether to overwrite existing values
         """
         for field in fields:
             # Find result for this field
-            field_results = [r for r in self.results if r.field_name == field.field_name]
-
-            if field_results:
-                result = field_results[0]
-
-                try:
-                    # Update CSV
-                    self.csv_handler.update_csv_value(
-                        csv_id=field.csv_id,
-                        comune=self.comune,
-                        year=self.year,
-                        column=field.column,
-                        value=result.value,
+            field_results = [r for r in self.results if r.field_name == field.name]
+            
+            if not field_results or not field_results[0].value:
+                continue
+            
+            result = field_results[0]
+            
+            try:
+                updated = self.csv_handler.update_csv_value(
+                    csv_id=field.csv_id,
+                    comune=self.comune,
+                    year=self.year,
+                    column=field.column,
+                    value=result.value,
+                    overwrite=overwrite,
+                )
+                
+                if not updated:
+                    self._add_warning(
+                        f"Skipped {field.name}: existing value (use --overwrite to replace)"
                     )
-                    self.stats.fields_extracted += 1
-
-                except Exception:
-                    pass
+                
+            except Exception as e:
+                self._add_error(
+                    "csv_update_error",
+                    f"Failed to update CSV for {field.name}: {str(e)}",
+                    {"field": field.name, "csv_id": field.csv_id},
+                )
 
     def _generate_report(
         self,
@@ -272,18 +386,26 @@ class PipelineOrchestrator:
             error_message: Optional error message
             
         Returns:
-            Run report
+            RunReport
         """
+        # Add final error if provided
+        if error_message:
+            self._add_error("pipeline_failure", error_message, {})
+        
         report = RunReport(
-            comune=self.comune,
+            comune_name=self.comune,
+            comune_name_normalized=self.comune,
+            site_url=f"https://www.comune.{self.comune}.it",  # Placeholder
             year=self.year,
-            start_time=datetime.now(),
-            end_time=datetime.now(),
+            run_timestamp=self.stats.start_time,
+            version="0.1.0",
+            config={},
             stats=self.stats,
-            field_results=self.results,
-            error=error_message,
+            fields=self.results,
+            errors=self.errors,
+            warnings=self.warnings,
         )
-
+        
         return report
 
     def _log(self, message: str, level: str = "info") -> None:
@@ -294,186 +416,34 @@ class PipelineOrchestrator:
             level: Log level
         """
         if level == "error":
-            logging.error(message)
+            logging.error(f"[{self.comune}/{self.year}] {message}")
         elif level == "warning":
-            logging.warning(message)
+            logging.warning(f"[{self.comune}/{self.year}] {message}")
         else:
-            logging.info(message)
-    
-    def run_analyze(
-        self,
-        pdf_dir: Path,
-        guide_path: Path,
-        overwrite: bool = False,
-    ) -> RunReport:
-        """Run analysis on local PDFs.
-        
-        This method skips discovery/download and works with already ingested PDFs.
+            logging.info(f"[{self.comune}/{self.year}] {message}")
+
+    def _add_error(self, error_type: str, message: str, context: dict) -> None:
+        """Add error to tracking.
         
         Args:
-            pdf_dir: Directory containing PDFs
-            guide_path: Path to GUIDA.md
-            overwrite: Overwrite existing CSV values
-            
-        Returns:
-            Run report
+            error_type: Type of error
+            message: Error message
+            context: Additional context
         """
-        from comuni_extractor.documents.pdf_extractor import (
-            extract_text_from_pdf,
-            is_readable_text,
-            compute_pdf_hash,
+        error = ProcessingError(
+            error_type=error_type,
+            message=message,
+            context=context,
+            recoverable=True,
         )
-        
-        try:
-            # Load guide
-            guide_parser = GuideParser()
-            fields = guide_parser.parse(guide_path)
-            
-            self._log(f"Analyzing {len(list(pdf_dir.glob('*.pdf')))} PDFs...")
-            
-            # Phase 1: Extract text from local PDFs
-            documents_data = []
-            pdf_files = list(pdf_dir.glob("*.pdf"))
-            
-            for pdf_path in pdf_files:
-                try:
-                    # Extract text
-                    text = extract_text_from_pdf(pdf_path)
-                    
-                    # Check readability gating
-                    if not is_readable_text(text, min_chars=100, min_alpha_ratio=0.5):
-                        self._log(f"Skipping unreadable PDF: {pdf_path.name}", level="warning")
-                        self.stats.pdfs_failed += 1
-                        continue
-                    
-                    # Compute hash
-                    pdf_hash = compute_pdf_hash(pdf_path)
-                    
-                    documents_data.append({
-                        'filename': pdf_path.name,
-                        'text': text,
-                        'hash': pdf_hash,
-                        'path': str(pdf_path),
-                    })
-                    
-                    self.stats.pdfs_downloaded += 1
-                    
-                except Exception as e:
-                    self._log(f"Failed to process {pdf_path.name}: {str(e)}", level="warning")
-                    self.stats.pdfs_failed += 1
-            
-            if not documents_data:
-                self._log("No readable PDFs found")
-                return self._generate_report(fields, "No readable PDFs")
-            
-            # Phase 2: Chunk and index
-            self._log("Chunking and indexing text...")
-            chunker = TextChunker()
-            all_chunks = []
-            
-            for doc_data in documents_data:
-                chunks = chunker.chunk(doc_data['text'], doc_data['filename'])
-                all_chunks.extend(chunks)
-            
-            indexer = TFIDFIndexer()
-            indexer.build(all_chunks)
-            
-            # Phase 3: Extract fields using LLM
-            self._log("Extracting fields with LLM...")
-            
-            for field in fields:
-                try:
-                    # Retrieve relevant chunks
-                    query = f"{field.field_name} {field.description}"
-                    relevant_chunks = indexer.search(query, top_k=5)
-                    
-                    if not relevant_chunks:
-                        continue
-                    
-                    # Extract using LLM
-                    chunk_texts = [chunk.text for chunk, _ in relevant_chunks]
-                    
-                    # Get document hash for caching
-                    doc_hash = documents_data[0]['hash'] if documents_data else ""
-                    
-                    results = self.llm_client.extract_fields(
-                        chunks=chunk_texts,
-                        fields=[field],
-                        document_hash=doc_hash,
-                    )
-                    
-                    self.results.extend(results)
-                    self.stats.fields_processed += 1
-                    
-                except Exception as e:
-                    self._log(f"Field extraction failed for {field.field_name}: {str(e)}", level="warning")
-            
-            # Phase 4: Aggregate results (definitivo > previsione)
-            self._log("Aggregating results...")
-            aggregator = ResultAggregator()
-            
-            for result in self.results:
-                if result.candidates:
-                    aggregated = aggregator.aggregate_result(result)
-                    # Update result with aggregated value
-                    result.value = aggregated.value
-                    result.confidence = aggregated.confidence
-            
-            # Phase 5: Update CSVs
-            self._log("Updating CSVs...")
-            self._update_csvs_with_overwrite(fields, overwrite)
-            
-            # Phase 6: Generate report
-            self._log("Generating report...")
-            report = self._generate_report(fields)
-            
-            return report
-            
-        except Exception as e:
-            self._log(f"Analysis error: {str(e)}", level="error")
-            return self._generate_report([], f"Analysis error: {str(e)}")
-    
-    def _update_csvs_with_overwrite(self, fields: List[FieldSpec], overwrite: bool) -> None:
-        """Update CSV files with results, respecting overwrite flag.
+        self.errors.append(error)
+        self._log(f"ERROR [{error_type}]: {message}", level="error")
+
+    def _add_warning(self, message: str) -> None:
+        """Add warning to tracking.
         
         Args:
-            fields: Field specifications
-            overwrite: Whether to overwrite existing values
+            message: Warning message
         """
-        for field in fields:
-            # Find result for this field
-            field_results = [r for r in self.results if r.field_name == field.field_name]
-            
-            if not field_results:
-                continue
-            
-            result = field_results[0]
-            
-            if result.value is None:
-                continue
-            
-            try:
-                # Check if value already exists
-                df = self.csv_handler.load_csv(field.csv_id)
-                existing_row = self.csv_handler.find_or_create_row(df, self.comune, self.year)
-                
-                has_existing_value = False
-                if existing_row is not None and field.column in df.columns:
-                    existing_value = existing_row[field.column] if hasattr(existing_row, field.column) else None
-                    has_existing_value = existing_value is not None and str(existing_value).strip() != ''
-                
-                # Only update if overwrite=True or no existing value
-                if overwrite or not has_existing_value:
-                    self.csv_handler.update_csv_value(
-                        csv_id=field.csv_id,
-                        comune=self.comune,
-                        year=self.year,
-                        column=field.column,
-                        value=result.value,
-                    )
-                    self.stats.fields_extracted += 1
-                else:
-                    self._log(f"Skipping {field.field_name} (existing value, use --overwrite)", level="warning")
-                
-            except Exception as e:
-                self._log(f"CSV update failed for {field.field_name}: {str(e)}", level="warning")
+        self.warnings.append(message)
+        self._log(message, level="warning")
