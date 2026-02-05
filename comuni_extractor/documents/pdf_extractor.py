@@ -98,20 +98,30 @@ def is_readable_text(
 ) -> bool:
     """Check if extracted text is readable enough for processing.
     
-    Applies configurable thresholds to filter out scanned/unreadable PDFs.
+    Ignores whitespace in readability calculation to avoid false negatives.
+    PDF extraction often produces heavily indented/spaced text, which should
+    not penalize readability assessment. Only significant characters are counted.
     
     Args:
         text: Extracted text
-        min_chars: Minimum character count
-        min_alpha_ratio: Minimum ratio of alphabetic characters (0-1)
+        min_chars: Minimum count of significant (non-whitespace) characters
+        min_alpha_ratio: Minimum ratio of alphabetic characters among significant chars (0-1)
         
     Returns:
         True if text passes readability checks
     """
-    if not text or len(text) < min_chars:
+    if not text:
         return False
     
-    alpha_count = sum(1 for c in text if c.isalpha())
-    alpha_ratio = alpha_count / len(text)
+    # Extract only significant characters (exclude whitespace)
+    significant = [c for c in text if not c.isspace()]
+    
+    # Check minimum length on significant chars only
+    if len(significant) < min_chars:
+        return False
+    
+    # Calculate alpha ratio only on significant characters
+    alpha_count = sum(1 for c in significant if c.isalpha())
+    alpha_ratio = alpha_count / len(significant)
     
     return alpha_ratio >= min_alpha_ratio

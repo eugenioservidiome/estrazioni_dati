@@ -46,10 +46,16 @@ class TestReadabilityGating:
         result = is_readable_text(low_alpha, min_chars=40, min_alpha_ratio=0.5)
         assert result is False
 
+    @pytest.mark.timeout(90)
     @patch("comuni_extractor.pipeline.orchestrator.extract_text_from_pdf")
     @patch("comuni_extractor.pipeline.orchestrator.LLMClient")
+    @patch("comuni_extractor.pipeline.orchestrator.CSVHandler")
+    @patch("comuni_extractor.pipeline.orchestrator.ReportGenerator")
+    @patch("comuni_extractor.pipeline.orchestrator.TextChunker")
+    @patch("comuni_extractor.pipeline.orchestrator.TFIDFIndexer")
     def test_orchestrator_skips_llm_on_unreadable_pdf(
-        self, mock_llm_client_class, mock_extract_pdf, tmp_path
+        self, mock_indexer_class, mock_chunker_class, mock_report_gen_class, 
+        mock_csv_handler_class, mock_llm_client_class, mock_extract_pdf, tmp_path
     ):
         """Test that orchestrator doesn't call LLM for unreadable PDFs."""
         from comuni_extractor.config import AppConfig
@@ -86,6 +92,32 @@ class TestReadabilityGating:
         # Mock LLM client
         mock_llm_instance = Mock()
         mock_llm_client_class.return_value = mock_llm_instance
+        
+        # Configure mock to return proper ExtractionResult if called
+        from comuni_extractor.models import ExtractionResult
+        mock_llm_instance.extract_field_candidates.return_value = ExtractionResult(
+            field_name="campo1",
+            csv_id=1,
+            column="test_col",
+            data_type=FieldDataType.TEXT,
+            candidates=[]
+        )
+        
+        # Mock other components
+        mock_csv_instance = Mock()
+        mock_csv_handler_class.return_value = mock_csv_instance
+        mock_csv_instance.update_csv_value.return_value = False
+        
+        mock_report_instance = Mock()
+        mock_report_gen_class.return_value = mock_report_instance
+        mock_report_instance.save_report.return_value = output_dir / "report.json"
+        
+        mock_chunker_instance = Mock()
+        mock_chunker_class.return_value = mock_chunker_instance
+        mock_chunker_instance.chunk.return_value = []
+        
+        mock_indexer_instance = Mock()
+        mock_indexer_class.return_value = mock_indexer_instance
 
         # Create config
         config = AppConfig()
@@ -126,10 +158,16 @@ class TestReadabilityGating:
         assert report.stats.download_stats.pdfs_failed > 0
         assert report.stats.download_stats.pdfs_successful == 0
 
+    @pytest.mark.timeout(90)
     @patch("comuni_extractor.pipeline.orchestrator.extract_text_from_pdf")
     @patch("comuni_extractor.pipeline.orchestrator.LLMClient")
+    @patch("comuni_extractor.pipeline.orchestrator.CSVHandler")
+    @patch("comuni_extractor.pipeline.orchestrator.ReportGenerator")
+    @patch("comuni_extractor.pipeline.orchestrator.TextChunker")
+    @patch("comuni_extractor.pipeline.orchestrator.TFIDFIndexer")
     def test_orchestrator_calls_llm_on_readable_pdf(
-        self, mock_llm_client_class, mock_extract_pdf, tmp_path
+        self, mock_indexer_class, mock_chunker_class, mock_report_gen_class, 
+        mock_csv_handler_class, mock_llm_client_class, mock_extract_pdf, tmp_path
     ):
         """Test that orchestrator DOES call LLM for readable PDFs."""
         from comuni_extractor.config import AppConfig
@@ -175,6 +213,52 @@ class TestReadabilityGating:
         # Mock LLM client
         mock_llm_instance = Mock()
         mock_llm_client_class.return_value = mock_llm_instance
+        
+        # Configure mock to return proper ExtractionResult with candidates
+        from comuni_extractor.models import ExtractionResult, ExtractionCandidate, ValueType as ValueTypeEnum
+        mock_llm_instance.extract_field_candidates.return_value = ExtractionResult(
+            field_name="campo1",
+            csv_id=1,
+            column="test_col",
+            data_type=FieldDataType.TEXT,
+            candidates=[
+                ExtractionCandidate(
+                    value="500000",
+                    value_type=ValueTypeEnum.DEFINITIVO,
+                    confidence=0.9,
+                    source_pdf="test.pdf",
+                    evidence="Entrate Totali: 1.500.000 euro",
+                )
+            ]
+        )
+        
+        # Mock other components
+        mock_csv_instance = Mock()
+        mock_csv_handler_class.return_value = mock_csv_instance
+        mock_csv_instance.update_csv_value.return_value = True
+        
+        mock_report_instance = Mock()
+        mock_report_gen_class.return_value = mock_report_instance
+        mock_report_instance.save_report.return_value = output_dir / "report.json"
+        
+        mock_chunker_instance = Mock()
+        mock_chunker_class.return_value = mock_chunker_instance
+        # Configure chunker to return some test chunks
+        from comuni_extractor.retrieval.chunker import TextChunk
+        test_chunk = TextChunk(
+            text="Bilancio di Previsione 2023",
+            start_pos=0,
+            end_pos=30,
+            chunk_id="test_chunk_1"
+        )
+        mock_chunker_instance.chunk.return_value = [test_chunk]
+        
+        mock_indexer_instance = Mock()
+        mock_indexer_class.return_value = mock_indexer_instance
+        # Configure indexer.build to accept anything
+        mock_indexer_instance.build.return_value = None
+        # Configure indexer.search to return the test chunk with a score
+        mock_indexer_instance.search.return_value = [(test_chunk, 0.8)]
 
         # Create config
         config = AppConfig()
@@ -200,7 +284,7 @@ class TestReadabilityGating:
                     data_type=FieldDataType.TEXT,
                 )
             ]
-
+            
             # Run analyze
             report = orchestrator.run_analyze(
                 pdf_dir=pdf_dir,
