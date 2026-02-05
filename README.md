@@ -2,6 +2,31 @@
 
 Extract structured data from Italian municipality websites using web crawling and LLM-powered extraction.
 
+## Google Colab Notebook (Marker-based, No API costs)
+
+For a **zero-cost, one-click solution** using Google Colab and Marker PDF conversion (no OpenAI API required), see:
+
+📓 **[notebooks/vigone_marker_extractor.ipynb](notebooks/vigone_marker_extractor.ipynb)**
+
+This notebook provides automated extraction for **Vigone municipality** with:
+- ✅ Web crawling to discover PDFs
+- ✅ Marker library for PDF→Markdown conversion (no OCR costs)
+- ✅ Zero-LLM extraction using regex and heuristics
+- ✅ Google Drive integration for templates and output
+- ✅ Caching and resume capability
+- ✅ Quick test mode (30 pages, 20 PDFs)
+
+**Usage:**
+1. Open the notebook in Google Colab
+2. Mount your Google Drive (OAuth)
+3. Ensure `dataset_dati_comuni` folder exists with 6 CSV templates
+4. Set `ANNO_TARGET` (e.g., 2024)
+5. Run all cells or use the quick test
+
+**Output:** Populated CSV files in `Comuni/Vigone/<ANNO_TARGET>/output/`
+
+---
+
 ## Quick Start
 
 ```bash
